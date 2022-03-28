@@ -10,8 +10,7 @@ using System.Reflection;
 using UnityEditor.UIElements;
 using UnityEngine.UIElements;
 using System.ComponentModel;
-
-
+using __SO__;
 
 public abstract class SO_Base : MonoBehaviour
 {
@@ -21,13 +20,13 @@ public abstract class SO_Base : MonoBehaviour
     protected virtual void SO_Enable() { }
     protected virtual void SO_Disable() { }
     protected void OnEnable() {
-        __SO__.SO.Load(this);
+        this.Load();
         SO_Enable();
     }
 
     protected void OnDisable() {
         SO_Disable();
-        __SO__.SO.Save(this);
+        this.Save();
     }
 
 }
@@ -61,6 +60,15 @@ public class SO_VariableAttribute : Attribute
 {
     public string m_pastName = null;
     public SO_VariableAttribute(string pastName = null) {
+        m_pastName = pastName;
+    }
+}
+
+[AttributeUsage(AttributeTargets.Field)]
+public class SO_MarkAttribute : Attribute
+{
+    public string m_pastName = null;
+    public SO_MarkAttribute(string pastName = null) {
         m_pastName = pastName;
     }
 }

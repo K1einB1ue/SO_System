@@ -10,62 +10,215 @@ using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System.Text.RegularExpressions;
 
+public static partial class FileEx {
+    public static string[] GetFileSystemEntries(string dir, string regexPattern = null, bool recurse = false, bool throwEx = false) {
+        List<string> lst = new List<string>();
+        try {
+            foreach (string item in Directory.GetFileSystemEntries(dir)) {
+                try {
+                    if (regexPattern == null || Regex.IsMatch(Path.GetFileName(item), regexPattern, RegexOptions.IgnoreCase | RegexOptions.Multiline)) {
+                        var lastDot = item.LastIndexOf('.');
+                        var ext = item.Substring(lastDot);
+                        if (!Regex.IsMatch(ext, ".meta", RegexOptions.IgnoreCase | RegexOptions.Multiline)) {
+                            lst.Add(item);
+                        }
+                    }
+                    if (recurse && (File.GetAttributes(item) & FileAttributes.Directory) == FileAttributes.Directory) { lst.AddRange(GetFileSystemEntries(item, regexPattern, true)); }
+                }
+                catch { if (throwEx) { throw; } }
+            }
+        }
+        catch { if (throwEx) { throw; } }
+        return lst.ToArray();
+    }
+}
+
+public static partial class FilterEx {
+
+    public static List<T> Filter<T>(IEnumerable<T> array, Func<T, bool> filterFunc) {
+        List<T> ret = new List<T>();
+         foreach (var item in array) { 
+                if (filterFunc(item)) {
+                ret.Add(item);
+            }
+        }
+        return ret;
+      }
+
+
+}
+
+
 namespace __SO__
 {
 
-    [CustomEditor(typeof(SO_Base), true)]
-    public class SO_Base_Editor : Editor
-    {
-        private bool LoadNeed = true;
-
-        public override void OnInspectorGUI() {
-            SO_Base soBase = (SO_Base)target;
-            base.OnInspectorGUI();
-            if (soBase.UUID == null) {
-                soBase.UUID = System.Guid.NewGuid().ToString("N");
+    public static class SO_System_Ex {
+        public static void Load(this SO_Base SoBase) {
+            var ClassObject = SO_System.SO_System_Target[SoBase.GetType().ToString()];
+            if (ClassObject.StaticFields.Count != 0 && File.Exists(SO_System.SO_Static_Save_File_Path(SoBase.GetType().ToString()))) {
+                using (StreamReader file = File.OpenText(SO_System.SO_Static_Save_File_Path(SoBase.GetType().ToString())))
+                using (JsonTextReader reader = new JsonTextReader(file)) {
+                    JObject oV = (JObject)JToken.ReadFrom(reader);
+                    foreach (var StaticPart in ClassObject.StaticFields) {
+                        SoBase.GetType().GetField(StaticPart.Name).SetValue(SoBase, oV[StaticPart.Name].ToObject(Type.GetType(StaticPart.Type)));
+                    }
+                }
             }
-            if (GUI.changed) {
-                SO.Save(soBase);
-                LoadNeed = true;
-                EditorUtility.SetDirty(soBase);
-            }
-            if (LoadNeed) {
-                SO.Load(soBase);
-                LoadNeed = false;
+            if (ClassObject.VariableFields.Count != 0 && File.Exists(SO_System.SO_Variable_Save_File_Path(SoBase.UUID))) {
+                using (StreamReader file = File.OpenText(SO_System.SO_Variable_Save_File_Path(SoBase.UUID)))
+                using (JsonTextReader reader = new JsonTextReader(file)) {
+                    JObject oV = (JObject)JToken.ReadFrom(reader);
+                    foreach (var VariablePart in ClassObject.VariableFields) {
+                        if (oV.TryGetValue(VariablePart.Name, out var value)) {
+                            SoBase.GetType().GetField(VariablePart.Name).SetValue(SoBase, value.ToObject(Type.GetType(VariablePart.Type)));
+                        }
+                        else {
+                            SoBase.GetType().GetField(VariablePart.Name).SetValue(SoBase, SO_System.DefaultObject(Type.GetType(VariablePart.Type)));
+                        }
+                    }
+                }
             }
         }
+
+ 
+        public static void ToJson (ref JTokenWriter writer, object target, bool defaultValue = false) {
+            bool listFlag = target is IList;
+            FieldInfo[] tempFields = target.GetType().GetFields(); 
+            var fields = FilterEx.Filter(tempFields, (FieldInfo item) => { 
+                return item.IsDefined(typeof(SO_MarkAttribute), false);
+            });  
+            bool classFlag = fields.Count > 0;
+            if (!listFlag && !classFlag) {
+                if (defaultValue) {
+                    writer.WriteValue(SO_System.DefaultObject(target.GetType()));
+                }
+                else { 
+                    writer.WriteValue(target);
+                }
+                return;
+            }
+ 
+            if (listFlag) {
+                writer.WriteStartArray();
+                foreach (var item in (IList)target) {
+                    ToJson(ref writer, item);
+                }
+                writer.WriteEndArray();
+                return;
+            }
+
+            
+            writer.WriteStartObject();
+            foreach (var field in fields) { 
+                writer.WritePropertyName(field.Name);
+                var value = field.GetValue(target);
+                if (value != null) {
+                    ToJson(ref writer, field.GetValue(target));
+                }
+                else {
+                    ToJson(ref writer, field.FieldType);
+                }
+            }
+            writer.WriteEndObject();
+        }
+
+        public static void ToJson(ref JTokenWriter writer, Type targetType) {
+            bool listFlag = typeof(IList).IsAssignableFrom(targetType); 
+            var tempFields = targetType.GetFields();
+            var fields = FilterEx.Filter(tempFields, (FieldInfo item) => {
+                return item.IsDefined(typeof(SO_MarkAttribute), false);
+            });
+            bool classFlag = fields.Count > 0;
+            if (!listFlag && !classFlag) {
+                writer.WriteValue(SO_System.DefaultObject(targetType));
+                return;
+            }
+
+            if (listFlag) {
+                writer.WriteStartArray();
+                writer.WriteEndArray();
+                return;
+            }
+
+
+            writer.WriteStartObject();  
+            foreach (var field in fields) {
+                writer.WritePropertyName(field.Name);
+                ToJson(ref writer, field.FieldType);
+            }
+            writer.WriteEndObject();
+        }
+
+        public static void Save(this SO_Base SoBase) {
+            var ClassObject = SO_System.SO_System_Target[SoBase.GetType().ToString()];
+            //公用量存储
+            if (ClassObject.StaticFields.Count != 0) {
+                JTokenWriter staticWriter = new JTokenWriter();
+                staticWriter.WriteStartObject();
+                for (int i = 0; i < ClassObject.StaticFields.Count; i++) {
+                    staticWriter.WritePropertyName(ClassObject.StaticFields[i].Name);
+                    ToJson(ref staticWriter, SoBase.GetType().GetField(ClassObject.StaticFields[i].Name).GetValue(SoBase));
+                }
+                staticWriter.WriteEndObject();
+                JObject o = (JObject)staticWriter.Token;
+#if SO_DEBUG
+            Debug.Log("触发保存:" + SO.SO_Static_Save_File_Path(this.GetType().ToString()));
+#endif
+                SO_System.RestoreJson(SO_System.SO_Static_Save_File_Path(SoBase.GetType().ToString()), o);
+            }
+
+            //变量储存
+            if (ClassObject.VariableFields.Count != 0) {
+                JTokenWriter variableWriter = new JTokenWriter();
+                variableWriter.WriteStartObject();
+                for (int i = 0; i < ClassObject.VariableFields.Count; i++) {
+                    variableWriter.WritePropertyName(ClassObject.VariableFields[i].Name);
+                    ToJson(ref variableWriter, SoBase.GetType().GetField(ClassObject.VariableFields[i].Name).GetValue(SoBase)); //variableWriter.WriteValue(SoBase.GetType().GetField(VariablePart.Name).GetValue(SoBase));
+                }
+                variableWriter.WriteEndObject();
+                JObject o = (JObject)variableWriter.Token;
+#if SO_DEBUG
+            Debug.Log("触发保存:" + SO.SO_Variable_Save_File_Path(UUID));
+#endif
+                SO_System.RestoreJson(SO_System.SO_Variable_Save_File_Path(SoBase.UUID), o);
+            }
+        }
+
     }
 
 
+    [CreateAssetMenu(fileName = "SO_System", menuName = "(用户禁用)/SO_System")]
+    public class SO_System : ScriptableObject
+    {
+        [SerializeField]
+        public string SO_Class_File_Path = "";
+        public string SO_Static_File_Path = "";
+        public string SO_Variable_File_Path = "";
+        public List<SO_Class> SO_Classes;
 
-    public static class SO {
 
-        
-        private static string[] GetFileSystemEntries(string dir, string regexPattern = null, bool recurse = false, bool throwEx = false) {
-            List<string> lst = new List<string>();
-            try {
-                foreach (string item in Directory.GetFileSystemEntries(dir)) {
-                    try {
-                        if (regexPattern == null || Regex.IsMatch(Path.GetFileName(item), regexPattern, RegexOptions.IgnoreCase | RegexOptions.Multiline)) {
-                            var lastDot = item.LastIndexOf('.');
-                            var ext = item.Substring(lastDot);
-                            if (!Regex.IsMatch(ext, ".meta", RegexOptions.IgnoreCase | RegexOptions.Multiline)) {
-                                lst.Add(item);
-                            }            
-                        }
-                        if (recurse && (File.GetAttributes(item) & FileAttributes.Directory) == FileAttributes.Directory) { lst.AddRange(GetFileSystemEntries(item, regexPattern, true)); }
-                    } catch { if (throwEx) { throw; } }
-                }
-            } catch { if (throwEx) { throw; } }
-            return lst.ToArray();
-        }
+        private bool SO_Version_Mark;
+        public Dictionary<string, int> SO_Exist = new Dictionary<string, int>();
+
+        private Dictionary<string, SO_Class> SO_Classes_Dictionary = null;
+
+
+
+        public static Dictionary<Type, JToken> SO_FallBack_Mapping = new Dictionary<Type, JToken>() {
+            {typeof(string), ""}
+        };
+
+        public static string SO_Static_Save_File_Path(string fileName) => System.IO.Path.Combine(Application.dataPath, "Resources", SO_System_Target.SO_Static_File_Path, fileName + ".save");
+        public static string SO_Variable_Save_File_Path(string fileName) => System.IO.Path.Combine(Application.dataPath, "Resources", SO_System_Target.SO_Variable_File_Path, fileName + ".save");
+        public static string SO_Static_Save_Path => Path.Combine(Application.dataPath, "Resources", SO_System_Target.SO_Static_File_Path);
+        public static string SO_Variable_Save_Path => Path.Combine(Application.dataPath, "Resources", SO_System_Target.SO_Variable_File_Path);
 
         public static string SO_System_Path = null;
-        public static SO_System SO_System {
+        public static SO_System SO_System_Target {
 
             get {
                 if (SO_System_Path == null) {
-                    var files = GetFileSystemEntries(Application.dataPath, "SO_Config.json", true, true);
+                    var files = FileEx.GetFileSystemEntries(Application.dataPath, "SO_Config.json", true, true);
                     if (files.Length > 1) {
                         throw new Exception($"搜索到了{files.Length}个SO_Config.json文件.请保证项目中只有一个SO_Config.json");
                     }
@@ -99,115 +252,34 @@ namespace __SO__
                 }
             }
         }
-    public static string SO_Static_Save_File_Path(string fileName) => System.IO.Path.Combine(Application.dataPath, "Resources", SO_System.SO_Static_File_Path, fileName + ".save");
-    public static string SO_Variable_Save_File_Path(string fileName) => System.IO.Path.Combine(Application.dataPath, "Resources", SO_System.SO_Variable_File_Path, fileName + ".save");
-    public static string SO_Static_Save_Path => Path.Combine(Application.dataPath, "Resources", SO_System.SO_Static_File_Path);
-    public static string SO_Variable_Save_Path => Path.Combine(Application.dataPath, "Resources", SO_System.SO_Variable_File_Path);
 
-    public static void RestoreJson(string fileName, JObject jObject) {
-        FileStream fs = new FileStream(fileName, FileMode.OpenOrCreate, FileAccess.ReadWrite);
-        StreamWriter sw = new StreamWriter(fs);
-        string json = jObject.ToString();
-        sw.WriteLine(json);
-        fs.SetLength(json.Length);
-        sw.Close();
-        fs.Close();
+        [DidReloadScripts(0)]
+        public static void Load_SO_System() {
+            if (SO_System_Target) {
+                SO_System_Target.Load();
+                EditorUtility.SetDirty(SO_System_Target);
+            }
+        }
+
+
+        public static void RestoreJson(string fileName, JObject jObject) {
+            FileStream fs = new FileStream(fileName, FileMode.OpenOrCreate, FileAccess.ReadWrite);
+            StreamWriter sw = new StreamWriter(fs);
+            string json = jObject.ToString();
+            sw.WriteLine(json);
+            fs.SetLength(json.Length);
+            sw.Close();
+            fs.Close();
 #if UNITY_EDITOR
-        UnityEditor.AssetDatabase.Refresh();
+            UnityEditor.AssetDatabase.Refresh();
 #endif
-    }
-
-    [DidReloadScripts(0)]
-    public static void Load_SO_System() {
-        if (SO_System) {
-            SO_System.Load();
-            EditorUtility.SetDirty(SO_System);
-        }
-    }
-
-    public static void Load(SO_Base SoBase) {
-        var ClassObject = SO_System[SoBase.GetType().ToString()];
-        if (ClassObject.StaticFields.Count != 0 && File.Exists(SO.SO_Static_Save_File_Path(SoBase.GetType().ToString()))) {
-            using (StreamReader file = File.OpenText(SO.SO_Static_Save_File_Path(SoBase.GetType().ToString())))
-            using (JsonTextReader reader = new JsonTextReader(file)) {
-                JObject oV = (JObject)JToken.ReadFrom(reader);
-                foreach (var StaticPart in ClassObject.StaticFields) {
-                    SoBase.GetType().GetField(StaticPart.Name).SetValue(SoBase, oV[StaticPart.Name].ToObject(Type.GetType(StaticPart.Type)));
-                }
-            }
-        }
-        if (ClassObject.VariableFields.Count != 0 && File.Exists(SO.SO_Variable_Save_File_Path(SoBase.UUID))) {
-            using (StreamReader file = File.OpenText(SO.SO_Variable_Save_File_Path(SoBase.UUID)))
-            using (JsonTextReader reader = new JsonTextReader(file)) {
-                JObject oV = (JObject)JToken.ReadFrom(reader);
-                foreach (var VariablePart in ClassObject.VariableFields) {
-                    SoBase.GetType().GetField(VariablePart.Name).SetValue(SoBase, oV[VariablePart.Name].ToObject(Type.GetType(VariablePart.Type)));
-                }
-            }
-        }
-    }
-
-
-    public static void Save(SO_Base SoBase) {
-        var ClassObject = SO_System[SoBase.GetType().ToString()];
-        //公用量存储
-        if (ClassObject.StaticFields.Count != 0) {
-            JTokenWriter staticWriter = new JTokenWriter();
-            staticWriter.WriteStartObject();
-            foreach (var StaticPart in ClassObject.StaticFields) {
-                staticWriter.WritePropertyName(StaticPart.Name);
-                staticWriter.WriteValue(SoBase.GetType().GetField(StaticPart.Name).GetValue(SoBase));
-            }
-            staticWriter.WriteEndObject();
-            JObject o = (JObject)staticWriter.Token;
-#if SO_DEBUG
-            Debug.Log("触发保存:" + SO.SO_Static_Save_File_Path(this.GetType().ToString()));
-#endif
-            SO.RestoreJson(SO.SO_Static_Save_File_Path(SoBase.GetType().ToString()), o);
         }
 
-        //变量储存
-        if (ClassObject.VariableFields.Count != 0) {
-            JTokenWriter variableWriter = new JTokenWriter();
-            variableWriter.WriteStartObject();
-            foreach (var VariablePart in ClassObject.VariableFields) {
-                variableWriter.WritePropertyName(VariablePart.Name);
-                variableWriter.WriteValue(SoBase.GetType().GetField(VariablePart.Name).GetValue(SoBase));
-            }
-            variableWriter.WriteEndObject();
-            JObject o = (JObject)variableWriter.Token;
-#if SO_DEBUG
-            Debug.Log("触发保存:" + SO.SO_Variable_Save_File_Path(UUID));
-#endif
-            SO.RestoreJson(SO.SO_Variable_Save_File_Path(SoBase.UUID), o);
-        }
-    }
-}
 
 
+     
 
-    [CreateAssetMenu(fileName = "SO_System", menuName = "(用户禁用)/SO_System")]
-    public class SO_System : ScriptableObject
-    {
-        [SerializeField]
-        public string SO_Class_File_Path = "";
-        public string SO_Static_File_Path = "";
-        public string SO_Variable_File_Path = "";
-        public List<SO_Class> SO_Classes;
-
-
-        private bool SO_Version_Mark;
-        public Dictionary<string, int> SO_Exist = new Dictionary<string, int>();
-
-        private Dictionary<string, SO_Class> SO_Classes_Dictionary = null;
-
-
-
-        public static Dictionary<Type, JToken> SO_FallBack_Mapping = new Dictionary<Type, JToken>() {
-        {typeof(string), ""}
-    };
-
-        public object DefaultObject(Type FieldType) {
+        public static object DefaultObject(Type FieldType) {
             try {
                 return Activator.CreateInstance(FieldType);
             }
@@ -219,7 +291,7 @@ namespace __SO__
                     throw new Exception($"无法被正常Json化:{FieldType}");
                 }
             }
-        }
+           }
         public SO_Class this[string Typename] {
             get {
                 if (SO_Classes_Dictionary == null) {
@@ -330,7 +402,7 @@ namespace __SO__
 
         private void CreateStaticSave() {
             //找到需要添加和删除的文件
-            var fullNames = System.IO.Directory.GetFiles(SO.SO_Static_Save_Path, "*.save");
+            var fullNames = System.IO.Directory.GetFiles(SO_Static_Save_Path, "*.save");
             List<string> fileNames = new List<string>();    //不带拓展名的文件名
             foreach (var fullName in fullNames) {
                 var tmp = System.IO.Path.GetFileName(fullName);
@@ -363,21 +435,22 @@ namespace __SO__
                     existList.Add(keyValue.Key);
                 }
             }
-
-            //进行添加操作.
+ 
+            //进行添加操作. 
             JTokenWriter staticWriter = new JTokenWriter();
-            foreach (var soClass in addList) {  //添加全新的文件,意味着它们不再需要进行文件校准
+              foreach (var soClass in addList) {  //添加全新的文件,意味着它们不再需要进行文件校准
                 staticWriter.WriteStartObject();
                 foreach (var StaticPart in soClass.StaticFields) {
                     staticWriter.WritePropertyName(StaticPart.Name);
-                    staticWriter.WriteValue(DefaultObject(Type.GetType(soClass.Type).GetField(StaticPart.Name).FieldType));
+                    //staticWriter.WriteValue(); 
+                       SO_System_Ex.ToJson (ref staticWriter, DefaultObject(Type.GetType(soClass.Type).GetField(StaticPart.Name).FieldType), true);  
                 }
                 staticWriter.WriteEndObject();
                 JObject o = (JObject)staticWriter.Token;
 #if SO_DEBUG
-            Debug.Log("添加新的Static文件:" + SO.SO_Static_Save_File_Path(soClass.Type));
+            Debug.Log("添加新的Static文件:" + SO.SO_Static_Save_File_Path(soClass.Type)); 
 #endif
-                FileStream fs = new FileStream(SO.SO_Static_Save_File_Path(soClass.Type), FileMode.OpenOrCreate, FileAccess.ReadWrite);
+                FileStream fs = new FileStream(SO_Static_Save_File_Path(soClass.Type), FileMode.OpenOrCreate, FileAccess.ReadWrite);
                 StreamWriter sw = new StreamWriter(fs);
                 string json = o.ToString();
                 sw.WriteLine(json);
@@ -390,57 +463,147 @@ namespace __SO__
 #if SO_DEBUG
             Debug.Log("删除过时的Static文件:" + SO.SO_Static_Save_File_Path(fileName));
 #endif
-                System.IO.File.Delete(SO.SO_Static_Save_File_Path(fileName));
+                System.IO.File.Delete(SO_Static_Save_File_Path(fileName));
             }
             //进行文件校准(对已存在的文件)
 
-            Dictionary<string, bool> fieldAdjustDic = new Dictionary<string, bool>();
+            bool needAdjust = false;
             foreach (var fileName in existList) {
 #if SO_DEBUG
             Debug.Log("更新已有的Static文件:" + SO.SO_Static_Save_File_Path(fileName));
 #endif
-                JObject oV = null;
-                using (StreamReader file = File.OpenText(SO.SO_Static_Save_File_Path(fileName))) {
+                JToken token = null;
+                using (StreamReader file = File.OpenText(SO_Static_Save_File_Path(fileName))) {
                     using (JsonTextReader reader = new JsonTextReader(file)) {
-                        oV = (JObject)JToken.ReadFrom(reader);
+                        token = JToken.ReadFrom(reader);
 
-                        fieldAdjustDic.Clear();
-                        foreach (var StaticPart in SO.SO_System[fileName].StaticFields) {
-                            if (oV.TryGetValue(StaticPart.Name, out var value)) {
-                                try {
-                                    value.ToObject(Type.GetType(StaticPart.Type));
+                        needAdjust = false;
+                        var fieldsPack = SO_System_Target[fileName].StaticFields;
+                        for (int i = 0; i < fieldsPack.Count; i++) {
+                            var targetToken = token.SelectToken($"$.{fieldsPack[i].Name}");
+                            if (targetToken != null) {
+                                if (TransferCheck(Type.GetType(fieldsPack[i].Type),  targetToken)) {
+                                    Debug.Log($"修改了{fileName}.save");
+                                    needAdjust = true;
+                                    break;
                                 }
-                                catch { //不能正确转化类型时.
-                                    Debug.Log($"修改了属性类型:{StaticPart.Name}于{fileName}.save");
-                                    fieldAdjustDic.Add(StaticPart.Name, true);
-                                }
-                            }
-                            else { //没有对应属性时
-                                Debug.Log($"补充了属性:{StaticPart.Name}于{fileName}.save");
-                                fieldAdjustDic.Add(StaticPart.Name, true);
+                            } 
+                            else { 
+                                 needAdjust = true;
+                                break; 
                             }
                         }
                     }
                 }
-                if (fieldAdjustDic.Count != 0) {
-                    var soClass = SO.SO_System[fileName];
+
+                if (needAdjust) {
+                    var soClass = SO_System_Target[fileName];
                     staticWriter.WriteStartObject();
                     foreach (var StaticPart in soClass.StaticFields) {
-                        staticWriter.WritePropertyName(StaticPart.Name);
-                        if (fieldAdjustDic.TryGetValue(StaticPart.Name, out var value)) {
-                            staticWriter.WriteValue(DefaultObject(Type.GetType(soClass.Type).GetField(StaticPart.Name).FieldType));
-                        }
-                        else {
-                            staticWriter.WriteValue(oV[StaticPart.Name].ToObject(Type.GetType(StaticPart.Type)));
-                        }
+                        ToJsonAsMuchAsPossible(ref staticWriter, Type.GetType(StaticPart.Type), token);
                     }
                     staticWriter.WriteEndObject();
                     JObject o = (JObject)staticWriter.Token;
-                    SO.RestoreJson(SO.SO_Static_Save_File_Path(soClass.Type), o);
+                    RestoreJson(SO_Static_Save_File_Path(soClass.Type), o);
                 }
             }
         }
 
+
+        public static bool TransferCheck (Type transTo,JToken token) {
+
+            var tempFields = transTo.GetFields();       //tmp damage
+            var fields = FilterEx.Filter(tempFields, (FieldInfo item) => {
+                return item.IsDefined(typeof(SO_MarkAttribute), false);
+            });
+
+            if (fields.Count > 0) { //如果是一个类的存储对象
+                for (int i = 0; i < fields.Count; i++) {
+                    var childPath = $"$.{fields[i].Name}";
+                    var childToken = token.SelectToken(childPath);
+                    if (childToken!=null) {
+                        if (TransferCheck(fields[i].FieldType, childToken)) {
+                            return true;
+                        }
+                    } else { //没找到字段
+                        return true;
+                    }
+                }
+            } else if(token.HasValues) {  //如果是值或列表并且有值的情况下.
+                try { token.ToObject(transTo); }
+                catch { return true; } //无法转换为另一种类型
+            }
+
+            return false;
+        }
+
+        public static void ToJsonAsMuchAsPossible(ref JTokenWriter writer, Type fieldType, JToken token) {
+            var tempFields = fieldType.GetFields();
+            var fields = FilterEx.Filter(tempFields, (FieldInfo item) => {
+                return item.IsDefined(typeof(SO_MarkAttribute), false);
+            });
+
+            foreach (var field in fields) {
+                var targetToken = token.SelectToken($"$.{field.Name}");
+
+
+                if (targetToken != null) { //有目标Token
+                    writer.WritePropertyName(field.Name);
+
+                    if (fieldType.IsAssignableFrom(typeof(IList))) { //当前是一个列表
+                        writer.WriteStartArray();
+                        var childrenTokens = targetToken.Children();
+                        foreach (var childrenToken in childrenTokens) {
+                            ToJsonAsMuchAsPossible(ref writer, fieldType.GetElementType(), childrenToken);
+                        }
+                        writer.WriteEndArray();
+                    }
+
+                    if (fields.Count > 0) { //如果是类
+                        writer.WriteStartObject();
+                        ToJsonAsMuchAsPossible(ref writer, field.FieldType, targetToken);
+                        writer.WriteEndObject();
+                    }
+
+                    //如果是值段
+                    if (targetToken.HasValues) {
+                        try { writer.WriteValue(targetToken.ToObject(field.FieldType)); }
+                        catch { SO_System_Ex.ToJson(ref writer, field.FieldType); }
+                    }
+                }
+                else {
+                    SO_System_Ex.ToJson(ref writer, fieldType);
+                }
+            }
+        }
+    }
+
+
+    
+    #region Editor
+
+
+    [CustomEditor(typeof(SO_Base), true)]
+    public class SO_Base_Editor : Editor
+    {
+        private bool LoadNeed = true;
+
+        public override void OnInspectorGUI() {
+            SO_Base soBase = (SO_Base)target;
+            base.OnInspectorGUI();
+            if (soBase.UUID == null) {
+                soBase.UUID = System.Guid.NewGuid().ToString("N");
+            }
+            if (GUI.changed) {
+                soBase.Save();
+                LoadNeed = true;
+                EditorUtility.SetDirty(soBase);
+            }
+            if (LoadNeed) {
+                soBase.Load();
+                LoadNeed = false;
+            }
+        }
     }
 
     [CustomEditor(typeof(SO_System))]
@@ -462,13 +625,16 @@ namespace __SO__
 
 
             if (GUILayout.Button("生成", GUILayout.Width(200))) {
-                SO.Load_SO_System();
+                SO_System.Load_SO_System();
             }
 
             if (EditorGUI.EndChangeCheck()) {
                 serializedObject.ApplyModifiedProperties();
             }
         }
-
     }
+
+
+    #endregion
+
 }
